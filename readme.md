@@ -80,9 +80,25 @@ python train.py --weights yolov7.pt --batch-size 2 --device 0
 
 # 生成推理阶段的模型
 
-由于yolov7中训练与推理并不是一个模型，是将训练后的模型进行重参数生成新模型。
+由于yolov7中**训练**与**推理**并不是一个模型，是将训练后的模型进行重参数生成新模型。
 
-因此需要运行tools/Reparameterization.py文件。【运行前注意修改文件中的权重路径以及类的数量】
+因此需要运行**tools/Reparameterization.py**文件。【运行前注意修改文件中的权重路径以及类的数量】
+
+```
+python tools/Reparameterization.py --ckpt yolov7.pt --num_classes 80 
+```
+
+
+
+## 生成剪枝后的推理模型
+
+```shell
+python tools/Reparameterization.py --ckpt runs/train/exp2/weights/best.pt --num_classes 1 --pruned 
+```
+
+不过发现重参数化后的剪枝模型，鲁棒性不如未参数化
+
+**将会在cfg/deploy下生成yolov7.pt**
 
 # torch转onnx
 
@@ -90,6 +106,71 @@ python train.py --weights yolov7.pt --batch-size 2 --device 0
 
 运行该代码即可得到onnx模型
 
+# 剪枝
+
+进入tools文件，修改prunmodel.py文件中需要剪枝的权重路径。重点修改58~62行。这里是以修改model的前10层为例。
+
+```python
+	included_layers = []
+    for layer in model.model[:10]:  # 获取backbone
+        if type(layer) is Conv:
+            included_layers.append(layer.conv)
+            included_layers.append(layer.bn)
+```
+
+下面代码是剪枝conv和BN层。【重点是tp.prune_conv】，自己修改amout
+
+```
+        if isinstance(m, nn.Conv2d) and m in included_layers:
+            # amount是剪枝率
+            # 卷积剪枝
+            pruning_plan = DG.get_pruning_plan(m, tp.prune_conv, idxs=strategy(m.weight, amount=0.8))
+            logger.info(pruning_plan)
+            # 执行剪枝
+            pruning_plan.exec()
+        if isinstance(m, nn.BatchNorm2d) and m in included_layers:
+            # BN层剪枝
+            pruning_plan = DG.get_pruning_plan(m, tp.prune_batchnorm, idxs=strategy(m.weight, amount=0.8))
+            logger.info(pruning_plan)
+            pruning_plan.exec()
+            
+    
+```
+
+```
+出现以下内容说明剪枝成功
+【感觉不如yolov5剪的参数多，v7的剪枝感觉效果一般，请自行尝试】
+2023-03-15 14:57:40.825 | INFO     | __main__:layer_pruning:84 -   Params: 37196556 => 36839795
+
+2023-03-15 14:57:41.176 | INFO     | __main__:layer_pruning:95 - 剪枝完成
+```
+
+剪枝的模型会保存在model_data下
+
+# 剪枝后的微调训练
+
+与之前的训练一样。只不过需要传入weights，和pruned
+
+```shell
+python train.py --weights model_data/layer_pruning.pt --pruned
+```
+
+# 预测图像或视频
+
+支持剪枝后的预测
+
+```shell
+python detect.py --weights cfg/deploy/yolov7.pt --source dataset/images/
+```
 
 
-**后续将更新tensorrt以及剪枝处理**，请持续关注
+
+
+
+
+
+**后续将更新tensorrt**，请持续关注
+
+
+
+如果剪枝遇到什么问题可以留言，有关精确度的问题还请自己尝试，因为每个人剪枝的地方不同，数据集不同，会有很多区别

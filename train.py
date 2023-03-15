@@ -69,15 +69,21 @@ def train(hyp, opt, device):
     pretrained = weights.endswith('.pt')
     # 判断是否有预权重
     if pretrained:  # 加载预权重
-        ckpt = torch.load(weights, map_location=device)  # 加载模型
-        # 模型的定义
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        exclude = ['anchor'] if (opt.cfg or hyp.get('anchors'))else []  # exclude keys
-        state_dict = ckpt['model'].float().state_dict()  # to FP32 获得预权重的权值
-        state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
-        # 将权重加载到模型内
-        model.load_state_dict(state_dict, strict=False)  # load
-        logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
+        if opt.pruned:
+            from models.yolo import attempt_load
+            #model = attempt_load(weights,map_location=device)
+            ckpt = torch.load(weights, map_location=device)
+            model = ckpt['model']
+        else:
+            ckpt = torch.load(weights, map_location=device)  # 加载模型
+            # 模型的定义
+            model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+            exclude = ['anchor'] if (opt.cfg or hyp.get('anchors'))else []  # exclude keys
+            state_dict = ckpt['model'].float().state_dict()  # to FP32 获得预权重的权值
+            state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
+            # 将权重加载到模型内
+            model.load_state_dict(state_dict, strict=False)  # load
+            logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
         model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     with torch_distributed_zero_first(rank):
@@ -192,28 +198,35 @@ def train(hyp, opt, device):
     # Resume
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
-        # Optimizer
-        if ckpt['optimizer'] is not None:
-            optimizer.load_state_dict(ckpt['optimizer'])
-            best_fitness = ckpt['best_fitness']
+        if not opt.pruned:
+            # Optimizer
+            if ckpt['optimizer'] is not None:
+                optimizer.load_state_dict(ckpt['optimizer'])
+                best_fitness = ckpt['best_fitness']
 
-        # EMA
-        if ema and ckpt.get('ema'):
-            ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
-            ema.updates = ckpt['updates']
+            # EMA
+            if ema and ckpt.get('ema'):
+                ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
+                ema.updates = ckpt['updates']
 
-        # Results
-        if ckpt.get('training_results') is not None:
-            results_file.write_text(ckpt['training_results'])  # write results.txt
+            # Results
+            if ckpt.get('training_results') is not None:
+                results_file.write_text(ckpt['training_results'])  # write results.txt
 
         # Epochs
-        start_epoch = ckpt['epoch'] + 1
+        if not opt.pruned:
+            start_epoch = ckpt['epoch'] + 1
+        elif opt.pruned:
+            ckpt['epoch'] = 0
+            start_epoch = ckpt['epoch'] + 1
         if epochs < start_epoch:
             logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
                         (weights, ckpt['epoch'], epochs))
             epochs += ckpt['epoch']  # finetune additional epochs
-
-        del ckpt, state_dict
+        if not opt.pruned:
+            del ckpt, state_dict
+        elif opt.pruned:
+            del ckpt
 
     # Image sizes
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
@@ -417,14 +430,19 @@ def train(hyp, opt, device):
             # Save model
             # 保存权重，需要注意的是保存的权重不仅仅保存了model，也保存了其他训练的信息
             if (not opt.nosave) or (final_epoch):  # if save
-                ckpt = {'epoch': epoch,
-                        'best_fitness': best_fitness,
-                        'training_results': results_file.read_text(),
+                if opt.pruned:
+                    ckpt = {
                         'model': deepcopy(model.module if is_parallel(model) else model).half(),
-                        'ema': deepcopy(ema.ema).half(),
-                        'updates': ema.updates,
-                        'optimizer': optimizer.state_dict(),
-                        'wandb_id': None}
+                            }
+                elif not opt.pruned:
+                    ckpt = {'epoch': epoch,
+                            'best_fitness': best_fitness,
+                            'training_results': results_file.read_text(),
+                            'model': deepcopy(model.module if is_parallel(model) else model).half(),
+                            'ema': deepcopy(ema.ema).half(),
+                            'updates': ema.updates,
+                            'optimizer': optimizer.state_dict(),
+                            'wandb_id': None}
 
                 # Save last, best and delete
                 torch.save(ckpt, last)
@@ -497,6 +515,7 @@ if __name__ == "__main__":
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     parser.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing epsilon')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
+    parser.add_argument('--pruned', action='store_true', default=False, help='pruned model fine train')
     opt = parser.parse_args()
 
     """

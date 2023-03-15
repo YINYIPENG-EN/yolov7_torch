@@ -4,4 +4,4 @@ import torch
 weights_path = '../yolov7.pt'
 model = attempt_load(weights_path, map_location='cpu')
 x = torch.ones(1, 3, 640, 640)
-torch.onnx.export(model, x, "../cfg/deploy/yolov7.onnx")
+torch.onnx.export(model, x, "../yolov7.onnx")
